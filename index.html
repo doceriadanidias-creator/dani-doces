@@ -634,11 +634,17 @@
       <label style="display:block;font-size:0.82rem;font-weight:600;color:var(--brown);margin-bottom:8px;">Ingredientes usados</label>
       <div id="prod-ing-lista" class="ing-lista"></div>
       <div class="form-row" style="margin-top:8px;">
-        <select id="sel-ing">
+        <select id="sel-ing" onchange="atualizarUnidadesUso()">
           <option value="">Selecione um ingrediente…</option>
         </select>
-        <input type="number" id="sel-qtd" placeholder="Qtd." min="0" step="0.01">
+        <select id="sel-un-uso" style="max-width:110px;">
+          <option value="">Un.</option>
+        </select>
       </div>
+      <div style="margin-top:8px;">
+        <input type="number" id="sel-qtd" placeholder="Quantidade na receita" min="0" step="0.01" style="width:100%;">
+      </div>
+      <div id="sel-conversao-info" style="font-size:0.75rem;color:var(--muted);margin-top:4px;min-height:16px;"></div>
       <button class="btn btn-secondary btn-sm" style="margin-top:8px;" onclick="adicionarIngredienteProduto()">＋ Adicionar ingrediente</button>
     </div>
 
@@ -676,6 +682,25 @@ let prodIngTemp  = []; // ingredientes temporários do modal produto
 // ═══════════════════════════════════════
 const fmt = v => 'R$ ' + Number(v).toFixed(2).replace('.',',');
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,6);
+
+// ── CONVERSÃO DE UNIDADES ──────────────────────────────────────
+const PARA_BASE = { g:1, kg:1000, ml:1, l:1000, un:1, cx:1, pct:1 };
+const UNIDADES_USO = {
+  kg:['kg','g'], g:['g'], l:['l','ml'], ml:['ml'], un:['un'], cx:['cx'], pct:['pct']
+};
+
+function qtdParaEstoque(qtd, unUso, unEstoque) {
+  if (unUso === unEstoque) return qtd;
+  return (qtd * (PARA_BASE[unUso]||1)) / (PARA_BASE[unEstoque]||1);
+}
+function custoPorUso(ing, qtdUso, unUso) {
+  return ing.custo * qtdParaEstoque(qtdUso, unUso, ing.un);
+}
+function labelConversao(qtd, unUso, ing) {
+  if (!qtd || !unUso || unUso === ing.un) return '';
+  const emEsto = qtdParaEstoque(qtd, unUso, ing.un);
+  return `= ${+emEsto.toFixed(4)} ${ing.un} no estoque · custo: ${fmt(ing.custo * emEsto)}`;
+}
 
 function salvar() {
   localStorage.setItem('doc_ing',  JSON.stringify(ingredientes));
@@ -803,19 +828,52 @@ function atualizarSelectIng() {
   const sel = document.getElementById('sel-ing');
   sel.innerHTML = '<option value="">Selecione um ingrediente…</option>';
   ingredientes.forEach(i => {
-    sel.innerHTML += `<option value="${i.id}">${i.nome} (${i.un})</option>`;
+    sel.innerHTML += `<option value="${i.id}">${i.nome} (estoque em ${i.un})</option>`;
   });
 }
 
-function adicionarIngredienteProduto() {
+function atualizarUnidadesUso() {
   const id  = document.getElementById('sel-ing').value;
-  const qtd = parseFloat(document.getElementById('sel-qtd').value) || 0;
-  if (!id)  { toast('Selecione um ingrediente','⚠️'); return; }
-  if (!qtd) { toast('Informe a quantidade','⚠️'); return; }
+  const selUn = document.getElementById('sel-un-uso');
+  const info  = document.getElementById('sel-conversao-info');
+  selUn.innerHTML = '';
+  info.textContent = '';
+  if (!id) { selUn.innerHTML = '<option value="">Un.</option>'; return; }
+  const ing = ingredientes.find(i => i.id === id);
+  if (!ing) return;
+  (UNIDADES_USO[ing.un] || [ing.un]).forEach(u => {
+    selUn.innerHTML += `<option value="${u}">${u}</option>`;
+  });
+  // Seleciona a unidade menor por padrão (g quando estoque é kg)
+  const opts = Array.from(selUn.options);
+  const menor = opts.reduce((a,b) => (PARA_BASE[a.value]||1) <= (PARA_BASE[b.value]||1) ? a : b);
+  selUn.value = menor.value;
+  atualizarInfoConversao();
+}
+
+function atualizarInfoConversao() {
+  const id    = document.getElementById('sel-ing').value;
+  const qtd   = parseFloat(document.getElementById('sel-qtd').value) || 0;
+  const unUso = document.getElementById('sel-un-uso').value;
+  const info  = document.getElementById('sel-conversao-info');
+  if (!id) { info.textContent = ''; return; }
+  const ing = ingredientes.find(i => i.id === id);
+  if (!ing) return;
+  info.textContent = labelConversao(qtd, unUso, ing);
+}
+
+function adicionarIngredienteProduto() {
+  const id    = document.getElementById('sel-ing').value;
+  const qtd   = parseFloat(document.getElementById('sel-qtd').value) || 0;
+  const unUso = document.getElementById('sel-un-uso').value;
+  if (!id)    { toast('Selecione um ingrediente','⚠️'); return; }
+  if (!qtd)   { toast('Informe a quantidade','⚠️'); return; }
+  if (!unUso) { toast('Selecione a unidade','⚠️'); return; }
   const exist = prodIngTemp.findIndex(x => x.id === id);
-  if (exist !== -1) { prodIngTemp[exist].qtd = qtd; }
-  else { prodIngTemp.push({ id, qtd }); }
+  if (exist !== -1) { prodIngTemp[exist].qtd = qtd; prodIngTemp[exist].unUso = unUso; }
+  else { prodIngTemp.push({ id, qtd, unUso }); }
   document.getElementById('sel-qtd').value = '';
+  document.getElementById('sel-conversao-info').textContent = '';
   renderProdIngTemp();
   atualizarCustoTotal();
 }
@@ -832,10 +890,12 @@ function renderProdIngTemp() {
   lista.innerHTML = prodIngTemp.map((x, i) => {
     const ing = ingredientes.find(ig => ig.id === x.id);
     if (!ing) return '';
-    const custo = ing.custo * x.qtd;
+    const unUso = x.unUso || ing.un;
+    const custo = custoPorUso(ing, x.qtd, unUso);
+    const conv  = unUso !== ing.un ? ` <span style="color:var(--muted);font-size:0.72rem;">(= ${+qtdParaEstoque(x.qtd,unUso,ing.un).toFixed(4)} ${ing.un})</span>` : '';
     return `<div class="ing-item">
       <span class="nome">${ing.nome}</span>
-      <span class="qtd">${x.qtd} ${ing.un}</span>
+      <span class="qtd">${x.qtd} ${unUso}${conv}</span>
       <span class="custo">${fmt(custo)}</span>
       <button class="ing-remove" onclick="removerIngProd(${i})">×</button>
     </div>`;
@@ -845,7 +905,9 @@ function renderProdIngTemp() {
 function calcularCustoProduto(ings) {
   return ings.reduce((sum, x) => {
     const ing = ingredientes.find(ig => ig.id === x.id);
-    return sum + (ing ? ing.custo * x.qtd : 0);
+    if (!ing) return sum;
+    const unUso = x.unUso || ing.un;
+    return sum + custoPorUso(ing, x.qtd, unUso);
   }, 0);
 }
 
@@ -1059,6 +1121,8 @@ function renderCardapio() {
 
 // Atualiza custo ao digitar porções no modal
 document.getElementById('prod-porcoes').addEventListener('input', atualizarCustoTotal);
+document.getElementById('sel-qtd').addEventListener('input', atualizarInfoConversao);
+document.getElementById('sel-un-uso').addEventListener('change', atualizarInfoConversao);
 
 // ═══════════════════════════════════════
 // INICIAR
